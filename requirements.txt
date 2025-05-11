@@ -1,0 +1,10 @@
+numpy==1.24.3
+pandas==2.0.3
+opencv-python==4.8.0.74
+matplotlib==3.7.2
+seaborn==0.12.2
+torch==2.0.1
+torchvision==0.15.2
+streamlit==1.25.0
+plotly==5.15.0
+ultralytics==8.0.145  # For YOLOv5
