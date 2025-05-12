@@ -10,6 +10,13 @@ import sys
 import cv2
 from pathlib import Path
 import base64
+from io import BytesIO  # Add this import if you don't have it already
+
+# Create permanent directories for storing uploaded and processed videos
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploaded_videos")
+PROCESSED_DIR = os.path.join(os.path.dirname(__file__), "processed_videos")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(PROCESSED_DIR, exist_ok=True)
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -29,6 +36,264 @@ st.set_page_config(
 # Main title
 st.title("Urban Mobility Analytics Dashboard")
 
+
+def convert_video_to_gif(video_path, gif_path, fps=5, max_size=480):
+    """Convert a video to an animated GIF with size and frame rate reduction."""
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(gif_path), exist_ok=True)
+
+    # Open the video
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        st.error(f"Could not open video: {video_path}")
+        return None
+
+    # Get video properties
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    video_fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Calculate new dimensions while maintaining aspect ratio
+    if width > height:
+        new_width = min(width, max_size)
+        new_height = int(height * (new_width / width))
+    else:
+        new_height = min(height, max_size)
+        new_width = int(width * (new_height / height))
+
+    # Calculate frame sampling rate based on desired FPS
+    sample_rate = max(1, int(video_fps / fps))
+
+    # Create a progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    status_text.text("Converting video to GIF...")
+
+    # Collect frames for the GIF
+    frames = []
+    frame_idx = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Process every Nth frame
+        if frame_idx % sample_rate == 0:
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Resize the frame
+            pil_img = Image.fromarray(frame_rgb)
+            pil_img = pil_img.resize((new_width, new_height), Image.LANCZOS)
+
+            # Add to frames
+            frames.append(np.array(pil_img))
+
+        # Update progress
+        if frame_idx % 20 == 0:
+            progress = min(int(100 * frame_idx / frame_count), 100)
+            progress_bar.progress(progress)
+            status_text.text(f"Converting to GIF: {progress}%")
+
+        frame_idx += 1
+
+    # Release the video
+    cap.release()
+
+    # Save as GIF
+    status_text.text("Saving GIF...")
+    imageio.mimsave(gif_path, frames, fps=fps)
+
+    # Complete
+    progress_bar.progress(100)
+    status_text.text("GIF conversion complete!")
+
+    return gif_path
+
+
+def display_gif(gif_path):
+    """Display a GIF in Streamlit."""
+    try:
+        # Check if file exists
+        if not os.path.exists(gif_path):
+            st.error(f"GIF not found: {gif_path}")
+            return False
+
+        # Display the GIF using markdown
+        with open(gif_path, "rb") as file:
+            contents = file.read()
+            data_url = base64.b64encode(contents).decode("utf-8")
+            st.markdown(
+                f'<img src="data:image/gif;base64,{data_url}" alt="processed video" width="100%">',
+                unsafe_allow_html=True,
+            )
+
+        return True
+    except Exception as e:
+        st.error(f"Error displaying GIF: {e}")
+        return False
+
+# Add Demo Button
+st.sidebar.markdown("---")
+st.sidebar.subheader("Try a Demo")
+st.sidebar.markdown("Don't have a video? Try our sample traffic video.")
+
+if st.sidebar.button("Load and Process Demo"):
+    # Path to sample video included with the app
+    sample_video_path = os.path.join(os.path.dirname(__file__), "demo", "sample_traffic.mp4")
+
+    # Check if sample video exists
+    if not os.path.exists(sample_video_path):
+        st.sidebar.error(f"Sample video not found. Please add a video at: {sample_video_path}")
+    else:
+        # Show the demo video
+        st.subheader("Sample Traffic Video")
+        st.video(sample_video_path)
+
+        # Get video info
+        cap = cv2.VideoCapture(sample_video_path)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        # Set default processing parameters
+        confidence = 0.3
+        sample_rate = 2
+
+        # Process the video with tracking
+        st.subheader("Processing demo video with tracking...")
+
+        # Output path for video and GIF
+        processed_video_path = os.path.join(PROCESSED_DIR, "demo_tracked.mp4")
+        processed_gif_path = os.path.join(PROCESSED_DIR, "demo_tracked.gif")
+
+        # Initialize detector and tracker
+        from src.detector import ObjectDetector
+        from src.tracker import ObjectTracker
+
+        detector = ObjectDetector()
+        tracker = ObjectTracker(max_disappeared=10, min_distance=50)
+
+        # Open the video
+        cap = cv2.VideoCapture(sample_video_path)
+        if not cap.isOpened():
+            st.error(f"Could not open video: {sample_video_path}")
+            st.stop()
+
+        # Get video properties again (to be safe)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Create video writer for output
+        os.makedirs(os.path.dirname(processed_video_path), exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(processed_video_path, fourcc, fps, (width, height))
+
+        # Storage for tracking data
+        tracking_data = []
+
+        # Create a progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Processing video with tracking...")
+
+        # Reset tracker object ID counter at start
+        tracker.next_object_id = 0
+
+        # Process frames
+        frame_idx = 0
+        processed_frames = 0
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Update progress
+            if frame_idx % 10 == 0:
+                progress = min(int(100 * frame_idx / frame_count), 100)
+                progress_bar.progress(progress)
+                status_text.text(f"Processing frame {frame_idx}/{frame_count} ({progress}%)")
+
+            # Process every Nth frame
+            if frame_idx % sample_rate == 0:
+                # Run detection
+                results = detector.detect(frame, confidence_threshold=confidence)
+
+                # Update tracker
+                objects = tracker.update(results['detections'])
+
+                # Draw detections and tracks
+                processed_frame = detector.draw_detections(frame, results)
+                processed_frame = tracker.draw_tracks(processed_frame)
+
+                # Write frame to output video
+                out.write(processed_frame)
+
+                # Store tracking data
+                for object_id, obj in objects.items():
+                    tracking_data.append({
+                        'frame': frame_idx,
+                        'object_id': object_id,
+                        'class_id': obj['class_id'],
+                        'class_name': next((d['class_name'] for d in results['detections']
+                                            if d['class_id'] == obj['class_id']), 'unknown'),
+                        'confidence': obj['confidence'],
+                        'x1': obj['bbox'][0],
+                        'y1': obj['bbox'][1],
+                        'x2': obj['bbox'][2],
+                        'y2': obj['bbox'][3],
+                        'center_x': obj['centroid'][0],
+                        'center_y': obj['centroid'][1],
+                        'timestamp': frame_idx / fps,
+                        'track_length': len(tracker.tracks[object_id])
+                    })
+
+                processed_frames += 1
+            else:
+                # For non-processed frames, just write the original
+                out.write(frame)
+
+            frame_idx += 1
+
+        # Release resources
+        cap.release()
+        out.release()
+
+        # Complete the progress bar
+        progress_bar.progress(100)
+        status_text.text("Processing complete!")
+
+        # Create DataFrame
+        tracking_df = pd.DataFrame(tracking_data)
+
+        if len(tracking_df) > 0:
+            st.success(f"Demo video processed successfully! Tracked {tracking_df['object_id'].nunique()} objects.")
+
+            # Convert processed video to GIF
+            st.subheader("Converting processed video to GIF...")
+            convert_video_to_gif(processed_video_path, processed_gif_path, fps=5, max_size=480)
+
+            # Show processed video as GIF
+            st.subheader("Processed Demo Video with Tracking")
+            display_gif(processed_gif_path)
+
+            # Save to session state for analysis
+            st.session_state['tracking_df'] = tracking_df
+            st.session_state['analysis_type'] = 'tracking'
+            st.session_state['video_width'] = width
+            st.session_state['video_height'] = height
+
+            # Prompt to view analysis
+            st.info("Demo processing complete! Use the tabs below to explore the analysis.")
+        else:
+            st.error("Demo processing failed or no objects were detected/tracked.")
 
 # Function to resize a video to a smaller resolution
 def resize_video(input_path, output_path, scale_factor=0.5):
