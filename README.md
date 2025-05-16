@@ -66,7 +66,7 @@ streamlit run dashboard/app.py
 
 ## Deployment
 
-This application can be deployed on Streamlit Cloud. See the deployment section for details.
+This application will be deployed on Streamlit cloud as soon as possible!
 
 ## About This Project
 
